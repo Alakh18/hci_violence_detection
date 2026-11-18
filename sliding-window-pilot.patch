@@ -1,0 +1,208 @@
+diff --git a/frontend/src/main.jsx b/frontend/src/main.jsx
+index 6d3379d..46b4a53 100644
+--- a/frontend/src/main.jsx
++++ b/frontend/src/main.jsx
+@@ -791,10 +791,22 @@ function App() {
+                     </span>
+                   </strong>
+                 </div>
++                {result.indian_pilot.flagged_intervals?.length > 0 && (
++                  <div className="metric-row">
++                    <span>Flagged at</span>
++                    <strong className="numeric">
++                      {result.indian_pilot.flagged_intervals
++                        .map(([a, b]) => `${a.toFixed(1)}–${b.toFixed(1)} s`)
++                        .join(", ")}
++                    </strong>
++                  </div>
++                )}
+                 <p className="pilot-note">
+                   Pilot head trained on Indian, DCSASS, UBI-Fights and XD-Violence
+-                  clips. Shown for human review only; it does not change the alert
+-                  above.
++                  clips. {result.indian_pilot.scoring
++                    ? `Peak of ${result.indian_pilot.windows.length} windows (${result.indian_pilot.scoring}). `
++                    : ""}
++                  Shown for human review only; it does not change the alert above.
+                 </p>
+               </>
+             )}
+diff --git a/src/surveillance/demo_service.py b/src/surveillance/demo_service.py
+index 1a4c6e7..50f8d4d 100644
+--- a/src/surveillance/demo_service.py
++++ b/src/surveillance/demo_service.py
+@@ -81,7 +81,12 @@ class DemoService:
+         if self.device_fallback:
+             result["device_fallback"] = self.device_fallback
+         if self.pilot is not None:
+-            result["indian_pilot"] = self.pilot.score(self.pipeline.anomaly.last_features)
++            extractor = self.pipeline.anomaly.extractor
++            units = getattr(extractor, "last_units", None)
++            if units is not None:
++                result["indian_pilot"] = self.pilot.score_windows(units, extractor.last_fps)
++            else:
++                result["indian_pilot"] = self.pilot.score(self.pipeline.anomaly.last_features)
+         result["timings"]["model_loading_seconds"] = loading
+         result["timings"]["request_total_seconds"] = time.perf_counter() - started
+         result["execution_mode"] = "on_demand"
+diff --git a/src/surveillance/features/c3d.py b/src/surveillance/features/c3d.py
+index 2b70feb..0c80053 100644
+--- a/src/surveillance/features/c3d.py
++++ b/src/surveillance/features/c3d.py
+@@ -152,4 +152,9 @@ class C3DExtractor:
+             outputs.append(self.model(torch.stack(batch).to(self.device)).cpu().numpy())
+             timings["c3d_seconds"] += time.perf_counter() - started
+         self.last_timings = timings
+-        return aggregate_segments(np.concatenate(outputs), num_segments)
++        units = np.concatenate(outputs)
++        # Raw per-16-frame FC6 units, kept so add-on heads can score short windows
++        # the way they were trained (2 s clips) instead of one whole-video average.
++        self.last_units = units
++        self.last_fps = metadata.fps
++        return aggregate_segments(units, num_segments)
+diff --git a/src/surveillance/inference/indian_pilot.py b/src/surveillance/inference/indian_pilot.py
+index 2fc1e4e..1a30dbe 100644
+--- a/src/surveillance/inference/indian_pilot.py
++++ b/src/surveillance/inference/indian_pilot.py
+@@ -6,6 +6,7 @@ never changes the cascade alert and is shown separately for human review.
+ """
+ 
+ import json
++import math
+ from pathlib import Path
+ 
+ import numpy as np
+@@ -13,6 +14,7 @@ import torch
+ 
+ from surveillance.datasets.dcsass_audit import sha256
+ from surveillance.training.indian_binary import load_binary_checkpoint
++from surveillance.video.segmentation import aggregate_segments
+ 
+ SCOPE = (
+     "Pilot score from a separately trained violence head, outside the cascade's validated "
+@@ -52,3 +54,71 @@ class IndianPilotHead:
+             "split_freeze_hash": self.spec["split_freeze_hash"],
+             "scope": SCOPE,
+         }
++
++    @torch.inference_mode()
++    def score_windows(
++        self,
++        units,
++        fps: float,
++        *,
++        window_sec: float = 2.0,
++        stride_sec: float = 1.0,
++        min_consecutive: int = 2,
++    ) -> dict:
++        """Score sliding 2 s windows, matching the 2 s clips the head was trained on.
++
++        The head was trained and thresholded on 2 s clips. Averaging a long upload into
++        one bag dilutes a short fight with the calm footage around it, so long videos
++        land near the threshold. Here each window gets its own 32-segment bag. A video
++        is flagged only when ``min_consecutive`` overlapping windows pass the threshold,
++        which limits extra false alarms from scoring many windows. A clip of 2 s or less
++        is a single window, identical to ``score``.
++        """
++        units = np.asarray(units, dtype=np.float32)
++        if units.ndim != 2 or len(units) < 1 or fps <= 0 or min_consecutive < 1:
++            raise ValueError("Expected [units, 4096] C3D units, positive fps and min_consecutive")
++        unit_sec = 16 / fps
++        width = max(1, math.ceil(round(window_sec * fps) / 16))
++        stride = max(1, round(stride_sec * fps / 16))
++        starts = list(range(0, max(len(units) - width, 0) + 1, stride))
++        if starts[-1] + width < len(units):
++            starts.append(len(units) - width)  # cover the tail of the video
++        bags = np.stack([aggregate_segments(units[s : s + width], 32) for s in starts])
++        scores = self.model(torch.from_numpy(bags)).softmax(-1)[:, 1].tolist()
++        threshold = float(self.spec["threshold"])
++        windows = [
++            {
++                "start_sec": s * unit_sec,
++                "end_sec": min(s + width, len(units)) * unit_sec,
++                "violence_score": score,
++                "above_threshold": score >= threshold,
++            }
++            for s, score in zip(starts, scores)
++        ]
++        intervals, run = [], []
++        for window in windows + [None]:
++            if window is not None and window["above_threshold"]:
++                run.append(window)
++                continue
++            if len(run) >= min_consecutive:
++                intervals.append([run[0]["start_sec"], run[-1]["end_sec"]])
++            run = []
++        if len(windows) == 1:  # short clip: same rule as the calibrated 2 s test clips
++            only = windows[0]
++            intervals = [[only["start_sec"], only["end_sec"]]] if only["above_threshold"] else []
++        whole_bag = torch.from_numpy(aggregate_segments(units, 32))[None]
++        whole = float(self.model(whole_bag).softmax(-1)[0, 1])
++        return {
++            "violence_score": max(scores),
++            "threshold": threshold,
++            "flagged": bool(intervals),
++            "flagged_intervals": intervals,
++            "scoring": f"sliding {window_sec:g} s windows, stride {stride_sec:g} s, "
++            f"flag needs {min_consecutive} consecutive windows",
++            "whole_clip_score": whole,
++            "windows": windows,
++            "threshold_rule": self.spec["threshold_rule"],
++            "model_sha256": self.spec["checkpoint_sha256"],
++            "split_freeze_hash": self.spec["split_freeze_hash"],
++            "scope": SCOPE,
++        }
+diff --git a/tests/test_indian_pilot.py b/tests/test_indian_pilot.py
+index b9c1acf..56d2fa0 100644
+--- a/tests/test_indian_pilot.py
++++ b/tests/test_indian_pilot.py
+@@ -259,3 +259,49 @@ def test_merged_splits_keep_assignments_and_never_merge_sources_across_datasets(
+     records[0]["split"] = "val"
+     with pytest.raises(ValueError, match="leakage"):
+         merge_frozen_splits(records, tmp_path / "bad", artifacts=[], scope="test", excluded={})
++
++
++def test_pilot_window_scoring_matches_whole_clip_for_short_clips_and_localizes_long_ones(
++    tmp_path,
++):
++    import torch
++
++    from surveillance.inference.indian_pilot import IndianPilotHead
++    from surveillance.models.indian_binary import FrozenBagBinaryHead
++    from surveillance.video.segmentation import aggregate_segments
++
++    head = FrozenBagBinaryHead(4)
++    with torch.no_grad():
++        head.classifier.weight.copy_(torch.tensor([[0.0] * 4, [8.0, 0, 0, 0]]))
++        head.classifier.bias.copy_(torch.tensor([0.0, -4.0]))
++    checkpoint = tmp_path / "best.pt"
++    torch.save(
++        {
++            "checkpoint_type": "indian_frozen_bag_binary_v1",
++            "classes": ["non_violence", "violence"],
++            "feature_dim": 4,
++            "model_state": head.state_dict(),
++        },
++        checkpoint,
++    )
++    spec = {
++        "checkpoint": "best.pt",
++        "checkpoint_sha256": sha256(checkpoint),
++        "threshold": 0.4,
++        "split_freeze_hash": "f" * 64,
++        "threshold_rule": "fixture",
++    }
++    pilot = IndianPilotHead(spec, tmp_path)
++    calm, fight = [0, 1, 0, 0], [1, 0, 0, 0]
++    short = np.array([calm, fight, fight, calm], dtype=np.float32)  # 2 s at 32 fps
++    result = pilot.score_windows(short, fps=32)
++    assert len(result["windows"]) == 1
++    assert result["violence_score"] == pytest.approx(
++        pilot.score(aggregate_segments(short, 32))["violence_score"]
++    )
++    long = np.array([calm] * 40 + [fight] * 8 + [calm] * 40, dtype=np.float32)  # 44 s
++    result = pilot.score_windows(long, fps=32)
++    assert result["whole_clip_score"] < 0.4 <= result["violence_score"]
++    assert result["flagged"]
++    [(start, end)] = result["flagged_intervals"]
++    assert 18 <= start and end <= 26

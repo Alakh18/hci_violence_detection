@@ -1,0 +1,180 @@
+diff --git a/frontend/src/Municipal.jsx b/frontend/src/Municipal.jsx
+index 731855d..3ef914f 100644
+--- a/frontend/src/Municipal.jsx
++++ b/frontend/src/Municipal.jsx
+@@ -14,6 +14,7 @@ async function request(path, options = {}) {
+   return payload;
+ }
+ const post = (path, data = {}) => request(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
++const remove = path => request(path, { method: "DELETE" });
+ const uid = () => crypto.randomUUID();
+ const pretty = value => JSON.stringify(value, null, 2);
+ const steps = [["add", "Add videos"], ["checking", "Checking"], ["review", "Your review"]];
+@@ -39,6 +40,7 @@ function Icon({ name, size = 22 }) {
+     auto: <><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8M12 16v4" /></>,
+     list: <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />,
+     arrow: <path d="M5 12h14M13 6l6 6-6 6" />,
++    trash: <><path d="M4 7h16M10 11v6M14 11v6" /><path d="M6 7l1 13h10l1-13M9 7V4h6v3" /></>,
+   };
+   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className={name === "spinner" ? "mp-spin" : undefined}>{shapes[name]}</svg>;
+ }
+@@ -76,6 +78,7 @@ export default function Municipal({ Legacy, Timeline }) {
+   const [decision, setDecision] = useState(null), [notes, setNotes] = useState(""), [marks, setMarks] = useState([]), [markStart, setMarkStart] = useState(null);
+   const [reference, setReference] = useState(undefined), [current, setCurrent] = useState(0), [saved, setSaved] = useState(false);
+   const [includeReferences, setIncludeReferences] = useState(false), [external, setExternal] = useState(false);
++  const [confirm, setConfirm] = useState(null);
+   const [theme, setTheme] = useState(() => stored("mp-theme", "auto")), [names, setNames] = useState(() => stored("mp-names", {})), [dragging, setDragging] = useState(false);
+   const video = useRef(null), fileInput = useRef(null), refreshVersion = useRef(0), pendingSubmission = useRef(null);
+ 
+@@ -142,6 +145,18 @@ export default function Municipal({ Legacy, Timeline }) {
+       go("checking"); setMessage("The app is checking this video now.");
+     });
+   }
++  async function removeClips(ids) {
++    setConfirm(null);
++    await action(async () => {
++      for (const [n, id] of ids.entries()) {
++        if (ids.length > 1) setMessage(`Removing video ${n + 1} of ${ids.length}…`);
++        await remove(`/clips/${id}/upload`);
++      }
++      setSelected(current => current.filter(id => !ids.includes(id)));
++      if (item && ids.includes(item.clip_id)) { setItem(null); go("add"); }
++      setMessage(ids.length === 1 ? "The video was removed from this computer. Answers you saved are kept." : `${ids.length} videos were removed from this computer. Answers you saved are kept.`);
++    });
++  }
+   async function saveReview() {
+     if (!decision) { setError("Choose one answer before saving."); return; }
+     if (!reviewer.trim()) { setError("Type your name before saving."); setEditingName(true); return; }
+@@ -159,10 +174,25 @@ export default function Municipal({ Legacy, Timeline }) {
+     if (!clip) return "Video";
+     return clip.population === "upload" ? `Uploaded video ${clip.sha256.slice(0, 6)}` : clip.source_video_id;
+   };
++  const removed = new Set(clips.filter(c => c.status === "deleted").map(c => c.clip_id));
+   const reviewedItems = new Set(results.filter(r => r.review_decision).map(r => r.item_id));
+-  const ready = results.filter(r => r.status === "completed" && !r.review_decision);
++  const ready = results.filter(r => r.status === "completed" && !r.review_decision && !removed.has(r.clip_id));
+   const finished = results.filter(r => r.review_decision);
+-  const items = jobs.flatMap(j => j.items.map(i => ({ ...i, job: j }))).reverse();
++  const items = jobs.flatMap(j => j.items.map(i => ({ ...i, job: j }))).reverse().filter(i => !removed.has(i.clip_id));
++  const checkingIds = new Set(items.filter(i => ["queued", "running"].includes(i.status)).map(i => i.clip_id));
++  const available = clips.filter(c => c.status === "available");
++  const removable = available.filter(c => c.owned_upload && !checkingIds.has(c.clip_id));
++  const removeControl = id => {
++    const clip = clips.find(c => c.clip_id === id);
++    if (!clip || clip.status !== "available" || !clip.owned_upload) return null;
++    if (checkingIds.has(id)) return <span className="mp-hint mp-inline">Stop checking to remove</span>;
++    if (confirm === id) return <span className="mp-confirm" role="group" aria-label="Confirm removal">
++      <span>Remove this video?</span>
++      <button className="mp-btn danger small" disabled={busy} onClick={() => removeClips([id])}><Icon name="trash" size={18} />Yes, remove</button>
++      <button className="mp-btn quiet small" onClick={() => setConfirm(null)}>Cancel</button>
++    </span>;
++    return <button className="mp-btn quiet small" disabled={busy} onClick={() => setConfirm(id)} aria-label={`Remove ${clipName(id)}`}><Icon name="trash" size={18} />Remove</button>;
++  };
+   const active = items.filter(i => ["queued", "running"].includes(i.status)).length;
+   const nextReady = ready.find(r => r.item_id !== item?.item_id);
+   const result = item?.result;
+@@ -218,8 +248,17 @@ export default function Municipal({ Legacy, Timeline }) {
+           <input ref={fileInput} type="file" multiple accept={videoTypes} hidden onChange={e => { addVideos(Array.from(e.target.files)); e.target.value = ""; }} />
+           <p className="mp-hint">MP4, MOV, AVI, MKV and WEBM files work. The app starts checking as soon as they are added.</p>
+         </div>
+-        {clips.some(c => c.status === "available") && <section className="mp-group"><h2>Videos already on this computer</h2>
+-          <ul className="mp-list">{clips.filter(c => c.status === "available").map(c => <li key={c.clip_id} className="mp-row"><span className="mp-row-name">{clipName(c.clip_id)}<small>{clockText(c.metadata.duration)} long</small></span><button className="mp-btn secondary small" disabled={busy} onClick={() => checkClip(c.clip_id)}>Check this video</button></li>)}</ul>
++        {available.length > 0 && <section className="mp-group">
++          <div className="mp-group-head">
++            <h2>Your videos <span className="mp-count">{available.length}</span></h2>
++            {removable.length > 1 && (confirm === "all" ? <span className="mp-confirm" role="group" aria-label="Confirm removing all videos">
++              <span>Remove {removable.length} videos?</span>
++              <button className="mp-btn danger small" disabled={busy} onClick={() => removeClips(removable.map(c => c.clip_id))}><Icon name="trash" size={18} />Yes, remove all</button>
++              <button className="mp-btn quiet small" onClick={() => setConfirm(null)}>Cancel</button>
++            </span> : <button className="mp-btn quiet small" disabled={busy} onClick={() => setConfirm("all")}><Icon name="trash" size={18} />Remove all</button>)}
++          </div>
++          <p className="mp-hint">Removing a video deletes the file from this app's storage. Answers you already saved stay in Finished. You can add the same video again later.</p>
++          <ul className="mp-list">{available.map(c => <li key={c.clip_id} className="mp-row"><span className="mp-row-name">{clipName(c.clip_id)}<small>{clockText(c.metadata.duration)} long</small></span><span className="mp-row-tools"><button className="mp-btn secondary small" disabled={busy || checkingIds.has(c.clip_id)} onClick={() => checkClip(c.clip_id)}>{checkingIds.has(c.clip_id) ? "Being checked" : "Check this video"}</button>{removeControl(c.clip_id)}</span></li>)}</ul>
+         </section>}
+       </>}
+ 
+@@ -233,6 +272,7 @@ export default function Municipal({ Legacy, Timeline }) {
+               {i.status === "completed" && <button className="mp-btn primary small" disabled={busy} onClick={() => openItem(i.item_id)}>{reviewedItems.has(i.item_id) ? "Open again" : "Watch and review"}</button>}
+               {["failed", "cancelled"].includes(i.status) && <button className="mp-btn secondary small" disabled={busy} onClick={() => action(async () => { await post(`/jobs/${i.job.job_id}/retry`, { idempotency_key: uid() }); setMessage("Trying again."); })}>Try again</button>}
+               {["queued", "running"].includes(i.status) && <button className="mp-btn quiet small" disabled={busy} onClick={() => action(async () => { await post(`/jobs/${i.job.job_id}/cancel`); setMessage("Stopping. The video being checked right now will finish first."); })}>Stop</button>}
++              {!["queued", "running"].includes(i.status) && removeControl(i.clip_id)}
+             </span></li>)}</ul>}
+       </>}
+ 
+@@ -249,6 +289,7 @@ export default function Municipal({ Legacy, Timeline }) {
+             <p className={`mp-finding tone-${finding.tone}`}>{finding.text}</p>
+             {moments.length > 0 && <><p className="mp-hint">The orange marks on the bar show where. Press a button to watch that part.</p>
+               <div className="mp-moments">{moments.map(([a], n) => <button key={n} className="mp-btn secondary small" onClick={() => seek(a, true)}><Icon name="play" size={16} />Watch moment {n + 1} · {clockText(a)}</button>)}</div></>}
++            <div className="mp-review-remove">{removeControl(item.clip_id)}</div>
+           </section>
+           <section className="mp-ask">
+             {saved ? <>
+@@ -289,7 +330,7 @@ export default function Municipal({ Legacy, Timeline }) {
+           <div className="mp-toolbar no-print"><a className="mp-btn secondary small" href={`${base}/export?format=csv&${exportQuery}`} download>Save as spreadsheet</a><button className="mp-btn quiet small" onClick={() => window.print()}>Print this list</button></div>
+           <ul className="mp-list">{finished.map(r => { const answer = decisions.find(d => d.value === r.review_decision); return <li key={r.item_id} className="mp-row">
+             <span className="mp-row-name">{clipName(r.clip_id)}<small>{r.reviews.at(-1)?.reviewer ? `Answered by ${r.reviews.at(-1).reviewer}` : "Answered"}</small></span>
+-            <span className="mp-row-tools"><span className={`mp-badge tone-${answer?.tone || "muted"}`}><Icon name={answer?.icon || "check"} size={16} />{decisionLabel(r.review_decision)}</span><button className="mp-btn quiet small no-print" disabled={busy} onClick={() => openItem(r.item_id)}>Open</button></span>
++            <span className="mp-row-tools"><span className={`mp-badge tone-${answer?.tone || "muted"}`}><Icon name={answer?.icon || "check"} size={16} />{decisionLabel(r.review_decision)}</span>{removed.has(r.clip_id) ? <span className="mp-hint mp-inline">Video removed</span> : <button className="mp-btn quiet small no-print" disabled={busy} onClick={() => openItem(r.item_id)}>Open</button>}</span>
+           </li>; })}</ul>
+         </>}
+       </>}
+diff --git a/frontend/src/municipal.css b/frontend/src/municipal.css
+index d361b07..641d37a 100644
+--- a/frontend/src/municipal.css
++++ b/frontend/src/municipal.css
+@@ -66,6 +66,13 @@
+ .mp-btn.primary { background:var(--mp-accent); color:var(--mp-accent-fg); }
+ .mp-btn.secondary { background:var(--mp-surface); color:var(--mp-accent); border-color:var(--mp-accent); }
+ .mp-btn.quiet { background:var(--mp-surface); color:var(--mp-fg); border-color:var(--mp-line); }
++.mp-btn.danger { background:var(--mp-bad); color:var(--mp-surface); }
++.mp-btn.danger:hover:not(:disabled) { filter:brightness(1.08); }
++.mp-confirm { display:inline-flex; flex-wrap:wrap; gap:8px; align-items:center; padding:6px 6px 6px 14px; border-radius:14px; background:var(--mp-bad-soft); color:var(--mp-bad); font-weight:700; }
++.mp-group-head { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; }
++.mp-count { display:inline-block; min-width:28px; margin-left:6px; padding:0 8px; border-radius:999px; background:var(--mp-surface-2); color:var(--mp-muted); font-size:16px; text-align:center; vertical-align:middle; }
++.mp-inline { margin:0; font-size:16px; }
++.mp-review-remove { margin-top:20px; padding-top:16px; border-top:1px solid var(--mp-line); }
+ .mp-link { background:none; border:0; padding:4px 2px; color:var(--mp-accent); font:inherit; font-weight:700; text-decoration:underline; text-underline-offset:3px; cursor:pointer; }
+ 
+ /* Status colours always travel with an icon and a word */
+diff --git a/src/surveillance/municipal/catalog.py b/src/surveillance/municipal/catalog.py
+index 73ef746..bc8c420 100644
+--- a/src/surveillance/municipal/catalog.py
++++ b/src/surveillance/municipal/catalog.py
+@@ -334,11 +334,18 @@ class Catalog:
+                 "SELECT clip_id,status FROM clips WHERE sha256=?", (metadata["sha256"],)
+             ).fetchone()
+             if existing:
++                if existing["status"] == "deleted":
++                    # Re-adding a removed upload restores it under the SAME clip_id, so
++                    # its reviews and audit history stay attached to one identity.
++                    db.execute(
++                        "UPDATE clips SET status='available', file_path=? WHERE clip_id=?",
++                        (str(path), existing["clip_id"]),
++                    )
++                    self.audit(db, "restore_upload", existing["clip_id"], "local_operator", {})
++                    return existing["clip_id"]
+                 path.unlink()
+                 if existing["status"] != "available":
+-                    raise ValueError(
+-                        "Duplicate refers to a deleted clip; preserve its audit identity"
+-                    )
++                    raise ValueError("Duplicate refers to an unavailable clip")
+                 return existing["clip_id"]
+             db.execute(
+                 "INSERT INTO clips VALUES(?,?,?,?,?,?,?,?,?,?,1)",
+diff --git a/tests/test_municipal_platform.py b/tests/test_municipal_platform.py
+index 0238bf1..4ca6afc 100644
+--- a/tests/test_municipal_platform.py
++++ b/tests/test_municipal_platform.py
+@@ -384,6 +384,11 @@ def test_owned_upload_retention_and_active_job_protection(catalog):
+     assert catalog.clip(clip_id)["status"] == "deleted"
+     with pytest.raises(ValueError, match="unavailable"):
+         queue.submit([clip_id], "deleted")
++    again = catalog.uploads / "again.avi"
++    again.write_bytes((catalog.import_root / spec["file_path"]).read_bytes())
++    assert catalog.add_upload(again) == clip_id
++    assert catalog.clip(clip_id)["status"] == "available"
++    assert catalog.video_path(catalog.clip(clip_id)) == again.resolve()
+ 
+ 
+ def test_worker_process_ownership(catalog):

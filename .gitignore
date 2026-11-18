@@ -1,0 +1,88 @@
+.venv/
+venv/
+.uv-cache/
+.mypy_cache/
+.tox/
+.nox/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+data/raw/
+data/indian-domain/
+data/features/
+data/examples/
+data/manifests/*.jsonl
+data/splits/*.txt
+checkpoints/
+runs/*
+# Indian pilot: protocol, decisions, reports and small metric JSON only.
+!runs/indian_pilot/
+# Symlink to /Volumes/Seagate_2TB/violence-training/indian_pilot/features (feature caches live on the SSD).
+runs/indian_pilot/features
+runs/indian_pilot/**/*.csv
+runs/indian_pilot/**/*.mp4
+runs/indian_pilot/**/*.png
+runs/indian_pilot/**/*.jpg
+outputs/
+configs/experiments/collective_pose_local.yaml
+configs/**/*.local.yaml
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.npy
+*.npz
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Downloaded dataset/source archives are external assets.
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+
+# Machine-local credentials/settings; keep intentional example templates.
+.env
+.env.*
+!.env.example
+.aws/
+.vscode/
+.idea/
+
+# macOS / Windows metadata.
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+
+# Local professor-demo assets and external qualitative footage.
+configs/demo/local_assets.yaml
+demo_external/*
+!demo_external/manifest.example.yaml
+frontend/node_modules/
+frontend/dist/
+
+# Municipal runtime media and catalogs.
+*.webm
+*.m4v
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+# Per-run training registrations duplicate the feature registry; keep only the deployed head's.
+runs/indian_pilot/experiments/*/registration.json
+!runs/indian_pilot/experiments/violence_f100_s7/registration.json
+runs/indian_pilot/experiments_v2/*/registration.json
+!runs/indian_pilot/experiments_v2/curve_d100_s7/registration.json
+runs/indian_pilot/experiments_v3/*/registration.json
+!runs/indian_pilot/experiments_v3/v3_all_s7/registration.json
+
+# Model bundle checksum list, unpacked at the repo root (docs/RUN_THE_MODEL.md).
+/MANIFEST.sha256
